@@ -8,15 +8,18 @@ use phoenix::{
 use phoenix_sdk::sdk_client::*;
 use solana_sdk::{clock::Clock, commitment_config::CommitmentConfig, pubkey::Pubkey, sysvar};
 
-use crate::helpers::print_helpers::{print_book_with_trader, LadderLevelEntry};
+use crate::helpers::print_helpers::{print_book_with_trader, LadderLevelEntry, print_market_statistics};
 
 pub async fn process_get_book_levels(
     market_pubkey: &Pubkey,
     sdk: &SDKClient,
     levels: u64,
+    show_extra_data: bool,
 ) -> anyhow::Result<()> {
     let mut ask_entries: Vec<LadderLevelEntry> = Vec::with_capacity(levels as usize);
     let mut bid_entries: Vec<LadderLevelEntry> = Vec::with_capacity(levels as usize);
+    let mut full_ask_entries: Vec<LadderLevelEntry> = Vec::new();
+    let mut full_bid_entries: Vec<LadderLevelEntry> = Vec::new();
 
     // Get market account
     let mut market_and_clock = sdk
@@ -78,15 +81,20 @@ pub async fn process_get_book_levels(
             entry.trader_present |= order.trader_index == trader_index as u64;
         }
 
-        // Otherwise, check length before attempting to add entry
+        // Otherwise, add entry
+        full_bid_entries.push(LadderLevelEntry {
+            tick: order_id.price_in_ticks.as_u64(),
+            lots: order.num_base_lots.as_u64(),
+            trader_present: order.trader_index == trader_index as u64,
+        });
+
+        // Check length before attempting to add entry to limited list
         if bid_entries.len() < levels as usize {
             bid_entries.push(LadderLevelEntry {
                 tick: order_id.price_in_ticks.as_u64(),
                 lots: order.num_base_lots.as_u64(),
                 trader_present: order.trader_index == trader_index as u64,
             })
-        } else {
-            break;
         }
     }
 
@@ -108,19 +116,32 @@ pub async fn process_get_book_levels(
             entry.trader_present |= order.trader_index == trader_index as u64;
         }
 
-        // Otherwise, check length before attempting to add entry
+        // Otherwise, add entry
+        full_ask_entries.push(LadderLevelEntry {
+            tick: order_id.price_in_ticks.as_u64(),
+            lots: order.num_base_lots.as_u64(),
+            trader_present: order.trader_index == trader_index as u64,
+        });
+
+        // Check length before attempting to add entry to limited list
         if ask_entries.len() < levels as usize {
             ask_entries.push(LadderLevelEntry {
                 tick: order_id.price_in_ticks.as_u64(),
                 lots: order.num_base_lots.as_u64(),
                 trader_present: order.trader_index == trader_index as u64,
             })
-        } else {
-            break;
         }
     }
 
-    print_book_with_trader(sdk, market_pubkey, &bid_entries, &ask_entries)?;
+    if show_extra_data {
+        print_market_statistics(
+            sdk, 
+            market_pubkey, 
+            &full_bid_entries, 
+            &full_ask_entries,
+        )?;
+    }
 
+    print_book_with_trader(sdk, market_pubkey, &bid_entries, &ask_entries, show_extra_data)?;
     Ok(())
 }

@@ -93,9 +93,10 @@ async fn main() -> anyhow::Result<()> {
         PhoenixCLICommand::GetBookLevels {
             market_pubkey,
             levels,
+            show_extra_data,
         } => {
             sdk.add_market(&market_pubkey).await?;
-            process_get_book_levels(&market_pubkey, &sdk, levels).await?
+            process_get_book_levels(&market_pubkey, &sdk, levels, show_extra_data).await?
         }
         PhoenixCLICommand::GetFullBook { market_pubkey } => {
             sdk.add_market(&market_pubkey).await?;

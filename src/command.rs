@@ -24,6 +24,8 @@ pub enum PhoenixCLICommand {
         market_pubkey: Pubkey,
         #[clap(short, long, required = false, default_value = "10")]
         levels: u64,
+        #[clap(short, long, required = false, default_value = "false")]
+        show_extra_data: bool,
     },
     /// Get the full order book for a given market
     GetFullBook { market_pubkey: Pubkey },

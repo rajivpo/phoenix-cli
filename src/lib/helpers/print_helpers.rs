@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use chrono::Utc;
 
 use colored::Colorize;
 use phoenix::program::status::MarketStatus;
@@ -92,6 +93,7 @@ pub fn print_book_with_trader(
     market: &Pubkey,
     bid_entries: &[LadderLevelEntry],
     ask_entries: &[LadderLevelEntry],
+    show_extra_data: bool,
 ) -> anyhow::Result<()> {
     let meta = sdk.get_market_metadata_from_cache(market)?;
     let raw_base_units_per_base_lot =
@@ -112,6 +114,19 @@ pub fn print_book_with_trader(
             lvl.trader_present,
         ))
     });
+    let highest_bid = bid_entries
+        .iter()
+        .max_by(|a, b| a.tick.cmp(&b.tick))
+        .and_then(|lvl| sdk.ticks_to_float_price(market, lvl.tick).ok())
+        .unwrap_or(0.0);
+
+    let lowest_ask = ask_entries
+        .iter()
+        .min_by(|a, b| a.tick.cmp(&b.tick))
+        .and_then(|lvl| sdk.ticks_to_float_price(market, lvl.tick).ok())
+        .unwrap_or(0.0);
+
+    let mid_price = (highest_bid + lowest_ask) / 2.0;
     let price_precision: usize = get_precision(
         10_u64.pow(meta.quote_decimals) * meta.raw_base_units_per_base_unit as u64
             / meta.tick_size_in_quote_atoms_per_base_unit,
@@ -148,6 +163,7 @@ pub fn print_book_with_trader(
         })
         .collect::<Vec<_>>();
 
+    
     let price_width = bid_strings
         .iter()
         .zip(ask_strings.iter())
@@ -166,6 +182,14 @@ pub fn print_book_with_trader(
         let str = format!(
             "  {:bid_width$} {:>price_width$} {:>ask_width$} {marker}",
             "", price, size
+        );
+        println!("{}", str);
+    }
+    if show_extra_data {
+        let mid_price_string = format_float(mid_price, price_precision);
+        let str = format!(
+            "  {:bid_width$} {:>price_width$} {:>ask_width$}",
+            "", mid_price_string, ""
         );
         println!("{}", str);
     }
@@ -527,4 +551,164 @@ pub fn finalize_log(mut log: Vec<String>, data: Vec<String>) -> String {
             .collect::<Vec<String>>(),
     );
     log.join(", ")
+}
+
+pub fn print_market_statistics(
+    sdk: &SDKClient,
+    market: &Pubkey,
+    bid_entries: &[LadderLevelEntry],
+    ask_entries: &[LadderLevelEntry],
+) -> anyhow::Result<()> {
+    let meta = sdk.get_market_metadata_from_cache(market)?;
+    let base_decimals = meta.base_decimals as usize;
+    let quote_decimals = meta.quote_decimals as usize;
+    let raw_base_units_per_base_lot =
+        meta.base_atoms_per_base_lot as f64 / meta.base_atoms_per_raw_base_unit as f64;
+
+    let highest_bid = bid_entries
+        .iter()
+        .max_by(|a, b| a.tick.cmp(&b.tick))
+        .and_then(|lvl| sdk.ticks_to_float_price(market, lvl.tick).ok())
+        .unwrap_or(0.0);
+    
+    let lowest_ask = ask_entries
+        .iter()
+        .min_by(|a, b| a.tick.cmp(&b.tick))
+        .and_then(|lvl| sdk.ticks_to_float_price(market, lvl.tick).ok())
+        .unwrap_or(0.0);
+
+    let mid_price = (highest_bid + lowest_ask) / 2.0;
+    let spread_absolute = lowest_ask - highest_bid;
+    let spread_bps = (spread_absolute / mid_price) * 10_000.0;
+
+    let lower_bound = mid_price * 0.98;
+    let upper_bound = mid_price * 1.02;
+
+    let bids_within_range: f64 = bid_entries.iter()
+        .filter_map(|lvl| {
+            let price = sdk.ticks_to_float_price(market, lvl.tick).ok()?;
+            if price >= lower_bound {
+                Some(lvl.lots as f64 * raw_base_units_per_base_lot * price)
+            } else {
+                None
+            }
+        })
+        .sum();
+
+    let asks_within_range: f64 = ask_entries.iter()
+        .filter_map(|lvl| {
+            let price = sdk.ticks_to_float_price(market, lvl.tick).ok()?;
+            if price <= upper_bound {
+                Some(lvl.lots as f64 * raw_base_units_per_base_lot * price)
+            } else {
+                None
+            }
+        })
+        .sum();
+
+    let _total_liquidity_within_range = bids_within_range + asks_within_range;
+    let buy_slippage_10k = calculate_slippage(
+        sdk, 
+        market, 
+        bid_entries, 
+        ask_entries,  
+        10_000.0, 
+        mid_price, 
+        raw_base_units_per_base_lot
+    )?;
+    
+    let buy_slippage_25k = calculate_slippage(
+        sdk, 
+        market, 
+        bid_entries, 
+        ask_entries,  
+        25_000.0, 
+        mid_price, 
+        raw_base_units_per_base_lot
+    )?;
+    
+    let sell_slippage_10k = calculate_slippage(
+        sdk, 
+        market, 
+        bid_entries, 
+        ask_entries,  
+        -10_000.0, 
+        mid_price, 
+        raw_base_units_per_base_lot
+    )?;
+    
+    let sell_slippage_25k = calculate_slippage(
+        sdk, 
+        market, 
+        bid_entries, 
+        ask_entries,  
+        -25_000.0, 
+        mid_price, 
+        raw_base_units_per_base_lot
+    )?;
+    let current_time = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+
+    println!(
+        "Time: {}, Spread: {:.base_decimals$}, Spread: {:.quote_decimals$} bps", current_time, spread_absolute, spread_bps);
+    println!(
+        "Buy slippage - $10k: {:.base_decimals$} bps, $25k: {:.base_decimals$} bps",
+        buy_slippage_10k,
+        buy_slippage_25k,
+    );
+    println!(
+        "Sell slippage - $10k: {:.base_decimals$} bps, $25k: {:.base_decimals$} bps",
+        sell_slippage_10k,
+        sell_slippage_25k,
+    );
+    // println!("Liq±2%: {:.base_decimals$}", total_liquidity_within_range);
+
+    Ok(())
+}
+
+fn calculate_slippage(
+    sdk: &SDKClient,
+    market: &Pubkey,
+    bid_entries: &[LadderLevelEntry],
+    ask_entries: &[LadderLevelEntry],
+    trade_size: f64,
+    mid_price: f64,
+    raw_base_units_per_base_lot: f64,
+) -> anyhow::Result<f64> {
+    let mut remaining_trade_size = trade_size.abs();
+    let mut total_quantity = 0.00;
+    
+    let entries = if trade_size > 0.0 {
+        let ask_entries_vec: Vec<_> = ask_entries.iter().collect();
+        ask_entries_vec.into_iter()
+    } else {
+        let bid_entries_vec: Vec<_> = bid_entries.iter().collect();
+        bid_entries_vec.into_iter()
+    };
+    
+    for lvl in entries {
+        let price = sdk.ticks_to_float_price(market, lvl.tick).unwrap();
+        let lots = lvl.lots as f64 * raw_base_units_per_base_lot;
+        let size_in_usd = lots * price;
+        if size_in_usd < remaining_trade_size {
+            total_quantity += lots;
+            remaining_trade_size -= size_in_usd;
+        } else {
+            let quantity = remaining_trade_size / price;
+            total_quantity += quantity;
+            remaining_trade_size = 0.0;
+            break;
+        }
+    }
+    
+    if remaining_trade_size > 0.0 {
+        // Not enough liquidity to fill the trade
+        return Err(anyhow::anyhow!("Not enough liquidity to fill the trade of size {}", trade_size.abs()));
+    }
+    
+    let average_execution_price = trade_size.abs() / total_quantity;
+    let slippage = (average_execution_price - mid_price) / mid_price;
+    let slippage_bps: f64 = slippage.abs() * 10_000.000;
+
+    Ok(slippage_bps)
+    
 }
